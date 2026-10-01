@@ -7,7 +7,7 @@ import { copyFileSync, existsSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply as applyPlugin, name as pluginName, inject } from '../index.js'
-import { defaultArchivePath, markerReport, readEntry } from '../apply.mjs'
+import { markerReport, readEntry, rewriteEntry } from '../apply.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REAL = 'C:/Users/Administrator/AppData/Local/Programs/DeepSeek Harness/resources/app.asar'
@@ -95,28 +95,34 @@ check('发现 1 个内置补丁', definitions.length === 1, definitions.map((d) 
 check('没有定义冲突', conflicts.length === 0, JSON.stringify(conflicts))
 check('补丁来自 builtin', definitions[0]?.origin === 'builtin')
 
-console.log('\n--- dry-run（只读真实安装版）---')
-const plan = service.plan(PATCH_ID)
+console.log('\n--- 准备一个干净的副本（全程不碰真实安装版）---')
+mkdirSync(HERE, { recursive: true })
+copyFileSync(REAL, COPY)
+
+// 这台机器的安装版可能已经打过补丁 —— 那是它正常的稳定状态，不是异常。
+// 副本先放回原始 lib/main.js（备份由 apply() 写出），拿它做基线，
+// 这个 spec 才不会因为"机器上已经装了"而整体变红。
+const pristineEntry = join(process.env.USERPROFILE ?? '', '.dsh', 'source-patch-backups', PATCH_ID, 'main.js.orig')
+if (existsSync(pristineEntry)) {
+  rewriteEntry(COPY, definitions[0].target.entry, readFileSync(pristineEntry))
+  console.log('      已把原始 lib/main.js 放回副本')
+} else {
+  console.log('      ⚠ 没找到原始备份；如果安装版已经打过补丁，下面的锚点会全部落空')
+}
+
+console.log('\n--- dry-run（只读副本）---')
+const plan = service.plan(PATCH_ID, COPY)
 check('全部锚点命中（failed=false）', plan.failed === false)
 check('7 处编辑', plan.edits.length === 7)
 check('状态为 pristine', plan.state === 'pristine', plan.state)
 check('体积会增长', plan.bytes.after > plan.bytes.before, `${plan.bytes.before} → ${plan.bytes.after}`)
 for (const edit of plan.edits) console.log(`      ${edit.ok ? '✔' : '✘'} ${edit.id}  (${edit.addedBytes >= 0 ? '+' : ''}${edit.addedBytes}B)`)
 
-const pristineSource = readEntry(defaultArchivePath(), definitions[0].target.entry).toString('utf8')
+const pristineSource = readEntry(COPY, definitions[0].target.entry).toString('utf8')
 const markers = markerReport(pristineSource, definitions[0].edits)
 check('未打补丁时所有 marker 都不该出现', markers.every((m) => m.markerPresent === false), markers.filter((m) => m.markerPresent).map((m) => m.id).join(', '))
 
 console.log('\n--- 应用/回滚全流程（打在副本上）---')
-if (!existsSync(COPY)) {
-  console.log(`      复制 ${statSync(REAL).size} 字节到 .test/app.asar …`)
-  copyFileSync(REAL, COPY)
-}
-const leftover = service.inspect(PATCH_ID, COPY).state
-if (leftover !== 'pristine') {
-  service.revert(PATCH_ID, PATCH_ID, COPY)
-  console.log(`      副本残留状态为 ${leftover}，已先回滚到 pristine`)
-}
 
 throws('confirm 不对时拒绝应用', () => service.apply(PATCH_ID, 'yes', COPY))
 throws('confirm 传 boolean 时拒绝', () => service.apply(PATCH_ID, true, COPY))
@@ -155,16 +161,18 @@ console.log('\n渲染输出：\n' + statusTool.output.render(one).split('\n').ma
 
 const applyTool = tools.find((t) => t.name === 'source_patch_apply')
 const revertTool = tools.find((t) => t.name === 'source_patch_revert')
+
+// 这两个工具故意不接受 archivePath 覆盖参数 —— 它们的目标永远是真实安装版。
+// 所以这里只验它们的守门行为，绝不真的对运行中的 DSH 下手；"确实能写"由
+// verify.mjs 在 .test/app.asar 副本上验证。
+let guarded = false
 try {
-  const viaTool = await applyTool.execute({ patchId: PATCH_ID, confirm: PATCH_ID }, exec)
-  check('工具能应用（真实安装版可写）', viaTool.changed === true, `delta=${viaTool.deltaBytes}B`)
-  await revertTool.execute({ patchId: PATCH_ID, confirm: PATCH_ID }, exec)
-  check('工具能回滚', service.inspect(PATCH_ID, COPY).state === 'pristine')
-} catch (error) {
-  // DSH 正在跑 → 真实 app.asar 被占用。这正是必须安全失败的路径。
-  check('DSH 在跑时安全失败并给出可读原因', /DSH 正在运行|关掉 DSH|cannot replace/.test(error.message), error.message.slice(0, 130))
-  check('失败后没有留下半成品文件', !existsSync(`${REAL}.dsh-patch.new`))
+  await applyTool.execute({ patchId: PATCH_ID, confirm: 'no' }, exec)
+} catch {
+  guarded = true
 }
+check('apply 工具拒绝错误的 confirm（因此不会误动真实安装版）', guarded)
+check('apply / revert 工具都在', typeof applyTool.execute === 'function' && typeof revertTool.execute === 'function')
 
 console.log('\n--- GitHub 远端（只读部分）---')
 const remoteTool = tools.find((t) => t.name === 'source_patch_remote')
