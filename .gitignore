@@ -1,0 +1,7 @@
+node_modules/
+.test/app.asar
+.test/main.patched.mjs
+*.dsh-patch.new
+*.log
+.DS_Store
+Thumbs.db

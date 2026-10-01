@@ -1,0 +1,11 @@
+# dsh-source-patch bundle patch.
+#
+# Installing through the official CLI —
+#
+#   dsh plugin --profile <name> add <path-or-git-url-of-this-package>
+#
+# — appends `dsh-source-patch` to `dsh.profile.bundles`; the profile boot then
+# merges this patch, which is a single `insert` of the plugin row.
+- insert:
+    - id: source-patch
+      name: 'dsh-source-patch'

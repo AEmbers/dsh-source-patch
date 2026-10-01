@@ -1,0 +1,32 @@
+{
+  "name": "dsh-source-patch",
+  "version": "0.1.0",
+  "description": "One-click anchored patching for the DSH desktop main process — lists, verifies, applies and reverts source patches against resources/app.asar, and exposes the same capability as the `ctx.sourcePatch` service so other plugins can declare the patches they need.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./apply.mjs": "./apply.mjs",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "manifestVersion": 1
+  },
+  "files": [
+    "index.js",
+    "apply.mjs",
+    "patches",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

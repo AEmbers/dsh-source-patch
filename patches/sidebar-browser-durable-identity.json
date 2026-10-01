@@ -1,0 +1,70 @@
+{
+  "id": "sidebar-browser-durable-identity",
+  "version": 1,
+  "title": "侧边栏浏览器：持久身份 / 功能完整 / agent 可操控",
+  "summary": "把 DSH 桌面版主进程里侧边栏浏览器 guest 的「固定隔离策略」改成「持久、按身份隔离」的策略，让侧边栏里的浏览器能长期记住登录、放行 Chromium 内嵌插件与原生弹窗、按白名单授予站点权限、允许下载，并可选地开一个只绑回环地址的 CDP 端点供 agent 操控。",
+  "target": {
+    "kind": "packaged-asar",
+    "entry": "lib/main.js",
+    "note": "改的是安装版 resources/app.asar 里打包后的 lib/main.js；开发版请直接改源码。"
+  },
+  "requiresRestart": true,
+  "edits": [
+    {
+      "id": "durable-partition",
+      "title": "内存分区 → 按 workspace 派生的持久分区",
+      "find": "partition = `dsh-sidebar-browser-\\$\\{randomUUID\\(\\)\\}`;",
+      "flags": "",
+      "replace": "partition = `persist:dsh-sidebar-browser-${createHash(\"sha256\").update(workspace).digest(\"hex\").slice(0, 32)}`;",
+      "marker": "persist:dsh-sidebar-browser-${createHash(\"sha256\")"
+    },
+    {
+      "id": "policy-header",
+      "title": "更新策略注释，并注入权限白名单与扩展目录读取",
+      "find": "/\\*\\* Main-process ownership and fixed isolation policy for Sidebar webview guests\\. \\*/",
+      "flags": "",
+      "replace": "/** Main-process ownership and durable, workspace-scoped isolation policy for Sidebar webview guests. */\nconst GRANTED_PERMISSIONS = /* @__PURE__ */ new Set([\"clipboard-read\", \"clipboard-sanitized-write\", \"fullscreen\", \"geolocation\", \"media\", \"notifications\", \"pointerLock\"]);\nfunction configuredExtensions() {\n\tconst raw = process.env.DSH_DESKTOP_BROWSER_EXTENSIONS;\n\tif (raw === void 0 || raw === \"\") return [];\n\tconst separator = process.platform === \"win32\" ? \";\" : \":\";\n\treturn raw.split(separator).map((value) => value.trim()).filter((value) => value.length > 0);\n}",
+      "marker": "const GRANTED_PERMISSIONS = /* @__PURE__ */ new Set(["
+    },
+    {
+      "id": "plugins-enabled",
+      "title": "放开 Chromium 内嵌插件（PDF 阅读器等）",
+      "find": "^([ \\t]*)plugins: false,$",
+      "flags": "m",
+      "replace": "$1plugins: true,",
+      "marker": "plugins: true,"
+    },
+    {
+      "id": "dialogs-enabled",
+      "title": "放开 alert / confirm / prompt 原生弹窗",
+      "find": "^([ \\t]*)disableDialogs: true,$",
+      "flags": "m",
+      "replace": "$1disableDialogs: false,",
+      "marker": "disableDialogs: false,"
+    },
+    {
+      "id": "extension-registry-field",
+      "title": "给 guest 拥有者加一个扩展加载登记表",
+      "find": "^([ \\t]*)leases = /\\* @__PURE__ \\*/ new Map\\(\\);$",
+      "flags": "m",
+      "replace": "$1leases = /* @__PURE__ */ new Map();\n$1extensionLoads = /* @__PURE__ */ new WeakSet();",
+      "marker": "extensionLoads = /* @__PURE__ */ new WeakSet();"
+    },
+    {
+      "id": "session-policy",
+      "title": "整体替换 configureSession：扩展加载 + 权限白名单 + 放行下载",
+      "find": "^([ \\t]*)configureSession\\(browserSession\\) \\{\n[ \\t]*browserSession\\.setPermissionRequestHandler\\(\\(_contents, _permission, callback\\) => \\{\n[ \\t]*callback\\(false\\);\n[ \\t]*\\}\\);\n[ \\t]*browserSession\\.setPermissionCheckHandler\\(\\(\\) => false\\);\n[ \\t]*browserSession\\.setDevicePermissionHandler\\(\\(\\) => false\\);\n[ \\t]*browserSession\\.setDisplayMediaRequestHandler\\(\\(_request, callback\\) => \\{\n[ \\t]*callback\\(\\{\\}\\);\n[ \\t]*\\}\\);\n[ \\t]*browserSession\\.on\\(\"will-download\", \\(event\\) => \\{\n[ \\t]*event\\.preventDefault\\(\\);\n[ \\t]*\\}\\);$",
+      "flags": "m",
+      "replace": "$1loadExtensions(browserSession) {\n$1\tif (this.extensionLoads.has(browserSession)) return;\n$1\tthis.extensionLoads.add(browserSession);\n$1\tfor (const directory of configuredExtensions()) browserSession.extensions.loadExtension(directory).catch((error) => {\n$1\t\tconsole.error(\"dsh desktop: failed to load a sidebar browser extension\", error);\n$1\t});\n$1}\n$1configureSession(browserSession) {\n$1\tthis.loadExtensions(browserSession);\n$1\tbrowserSession.setPermissionRequestHandler((_contents, permission, callback) => {\n$1\t\tcallback(GRANTED_PERMISSIONS.has(permission));\n$1\t});\n$1\tbrowserSession.setPermissionCheckHandler((_contents, permission) => GRANTED_PERMISSIONS.has(permission));\n$1\tbrowserSession.setDevicePermissionHandler(() => false);\n$1\tbrowserSession.setDisplayMediaRequestHandler((_request, callback) => {\n$1\t\tcallback({});\n$1\t});\n$1\tbrowserSession.on(\"will-download\", () => {});",
+      "marker": "this.loadExtensions(browserSession);"
+    },
+    {
+      "id": "guest-cdp-endpoint",
+      "title": "新增 DSH_DESKTOP_CDP_PORT：可选的回环 CDP 端点，供 agent 操控侧边栏 guest",
+      "find": "^([ \\t]*)if \\(claimDesktopSingleInstance\\(app, \\(\\) => \\{$",
+      "flags": "m",
+      "replace": "function installGuestDebuggingEndpoint() {\n\tconst raw = process.env.DSH_DESKTOP_CDP_PORT;\n\tif (raw === void 0 || raw === \"\") return;\n\tconst port = Number(raw);\n\tif (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(\"dsh desktop: DSH_DESKTOP_CDP_PORT must be an integer from 1 through 65535\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-address\", \"127.0.0.1\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-port\", String(port));\n}\ninstallGuestDebuggingEndpoint();\n$1if (claimDesktopSingleInstance(app, () => {",
+      "marker": "function installGuestDebuggingEndpoint() {"
+    }
+  ]
+}
