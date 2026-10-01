@@ -3,7 +3,7 @@
  *
  * 全程不动真实安装版：只读地检查它、把改动打在 .test/app.asar 副本上。
  */
-import { copyFileSync, existsSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply as applyPlugin, name as pluginName, inject } from '../index.js'
