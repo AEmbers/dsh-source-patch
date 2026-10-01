@@ -5,9 +5,15 @@
   "type": "module",
   "main": "index.js",
   "exports": {
-    ".": "./index.js",
-    "./client": "./lib/client.js",
-    "./apply.mjs": "./apply.mjs",
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./apply.mjs": {
+      "default": "./apply.mjs"
+    },
     "./package.json": "./package.json"
   },
   "engines": {
