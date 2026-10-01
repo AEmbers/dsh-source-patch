@@ -65,6 +65,30 @@ export function apply(ctx) {
 
 就是下面那个 `sidebar-browser-durable-identity`。
 
+### 4. 侧边栏「补丁管理」Tab
+
+装好后侧边栏会多一个 **补丁管理** 面板（「开始」菜单里也有入口），里面能：
+
+- 看到每个补丁的 **状态徽章**（未应用 / 已应用 / 半应用 / 不可用）、来源、编辑数、体积
+- **应用 / 回滚** —— 两步确认：第一次点"应用"只是**武装**，按钮变成"确认应用？"，再点一次才真的执行
+- **锚点校验** —— 就地展开逐条锚点的 dry-run 结果（✔/✘ + 字节数），不写盘
+- **GitHub 区块** —— gh 装没装 / 登录没登录 / 私有仓库在不在；远端有哪些补丁、装没装、有没有更新；一键「发布全部」「安装 / 更新 / 卸载」
+- 任何失败（锚点对不上、DSH 正在跑导致 EPERM）都原样显示在面板上，不吞错
+
+客户端半边是**手写的** `lib/client.js`，不是构建产物 —— 它就是一个符合 DSH 客户端模块格式的文件：
+
+```js
+window.__ModuleLoader__.load({
+  id: "dsh-source-patch",
+  factory: (require) => { /* … */ return module.exports },
+})
+```
+
+里面只 `require("react")`，其余全靠宿主注入。所以改 UI 不需要任何构建工具链，改完直接能读。
+
+它通过宿主半边的 `POST /source-patch/api/<method>` 说话，那条路由带 **信任围栏**（防 DNS rebinding / 跨站）——
+这条路由能改主进程，围栏不是可选项。
+
 ### 自检
 
 ```powershell
@@ -200,12 +224,17 @@ node apply.mjs              # dry-run 校验锚点
 ## 目录
 
 ```
-index.js                                    host 半边：ctx.sourcePatch 服务 + 三个 agent 工具
+index.js                                    host 半边：ctx.sourcePatch 服务 + 4 个 agent 工具
+remote.js                                   GitHub 私有补丁仓库（gh + git，不碰 token）
+fence.js                                    /source-patch/api 的浏览器信任围栏
+lib/client.js                               客户端半边：侧边栏「补丁管理」Tab（手写，无需构建）
 cordis.patch.yml                            插件行（dsh.bundle.patch 那一层）
-package.json                                插件清单（dsh.bundle.patch / manifestVersion）
+package.json                                插件清单（dsh.bundle.patch / dsh.client / manifestVersion）
 apply.mjs                                   引擎 + CLI（index.js 就是 import 它）
 patches/sidebar-browser-durable-identity.json   补丁定义（锚点正则 + 替换模板 + marker）
-.test/plugin.spec.mjs                       插件自检
+.test/plugin.spec.mjs                       宿主半边自检（含 HTTP 路由）
+.test/client.spec.mjs                       客户端半边自检（假 loader + 假 React）
+.test/remote-demo.mjs                       GitHub 链路真跑一遍（会建私有仓库）
 .test/verify.mjs                            asar 读写引擎的端到端验证
 ```
 

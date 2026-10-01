@@ -6,6 +6,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./lib/client.js",
     "./apply.mjs": "./apply.mjs",
     "./package.json": "./package.json"
   },
@@ -16,12 +17,22 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-session"
+      ],
+      "platform": "web"
+    },
     "manifestVersion": 1
   },
   "files": [
     "index.js",
     "remote.js",
+    "fence.js",
     "apply.mjs",
+    "lib/client.js",
     "patches",
     "cordis.patch.yml",
     "README.md"

@@ -34,6 +34,7 @@ console.log(`插件标识  name=${pluginName}  inject=${JSON.stringify(inject)}`
 const tools = []
 const provided = new Map()
 const disposers = []
+const routes = []
 const ctx = {
   provide: (key, value) => provided.set(key, value),
   effect: (fn) => {
@@ -41,6 +42,43 @@ const ctx = {
     if (typeof dispose === 'function') disposers.push(dispose)
   },
   tools: { register: (tool) => { tools.push(tool); return () => {} } },
+  webServer: { register: (route) => { routes.push(route); return () => {} } },
+  webRuntime: { trustedHosts: [] },
+}
+
+/** Minimal node-request stand-in for the route handler. */
+function fakeReq(method, path, { host = '127.0.0.1:19387', body, headers = {} } = {}) {
+  const listeners = new Map()
+  const req = {
+    method,
+    url: path,
+    headers: { host, ...headers },
+    on(event, fn) {
+      const list = listeners.get(event) ?? []
+      list.push(fn)
+      listeners.set(event, list)
+      return req
+    },
+    destroy() {},
+  }
+  queueMicrotask(() => {
+    if (body !== undefined) for (const fn of listeners.get('data') ?? []) fn(Buffer.from(JSON.stringify(body)))
+    for (const fn of listeners.get('end') ?? []) fn()
+  })
+  return req
+}
+
+/** Minimal node-response stand-in; `done()` resolves once the handler ends it. */
+function fakeRes() {
+  let settle
+  const finished = new Promise((resolve) => { settle = resolve })
+  const res = {
+    status: undefined,
+    body: undefined,
+    writeHead(status) { res.status = status; return res },
+    end(text) { res.body = text === undefined ? undefined : JSON.parse(text); settle() },
+  }
+  return { res, done: () => finished }
 }
 
 console.log('\n--- 挂载插件 ---')
@@ -147,9 +185,52 @@ try {
   check('未知 action 被拒', /未知的 action/.test(error.message))
 }
 
+console.log('\n--- 客户端半边走的 HTTP 路由 ---')
+check('注册了 1 条路由', routes.length === 1, routes.map((r) => `${r.kind}:${r.path}`).join(', '))
+const route = routes[0]
+check('路由是 /source-patch/api 前缀', route?.path === '/source-patch/api' && route?.kind === 'prefix')
+
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('POST', '/source-patch/api/status', { body: {} }), res)
+  await done()
+  check('POST status → 200', res.status === 200 && res.body.ok === true)
+  check('status 带补丁列表和 asar 路径', Array.isArray(res.body.value.patches) && typeof res.body.value.archive === 'string', `${res.body.value.patches.length} 个补丁`)
+}
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('POST', '/source-patch/api/plan', { body: { patchId: PATCH_ID } }), res)
+  await done()
+  check('POST plan → 7 处锚点', res.status === 200 && res.body.value.edits.length === 7)
+}
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('POST', '/source-patch/api/apply', { body: { patchId: PATCH_ID, confirm: 'wrong' } }), res)
+  await done()
+  check('confirm 不对 → 400 且不写盘', res.status === 400 && /confirmation/.test(res.body.error.message))
+}
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('POST', '/source-patch/api/nope', { body: {} }), res)
+  await done()
+  check('未知方法 → 404', res.status === 404)
+}
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('POST', '/source-patch/api/status', { body: {}, headers: { 'sec-fetch-site': 'cross-site' } }), res)
+  await done()
+  check('跨站请求被信任围栏拒绝 → 403', res.status === 403)
+}
+{
+  const { res, done } = fakeRes()
+  await route.handler(fakeReq('GET', '/source-patch/api/status'), res)
+  await done()
+  check('GET 被拒 → 405', res.status === 405)
+}
+
 console.log('\n--- 清理 ---')
 for (const dispose of disposers) dispose()
-check('所有 disposer 都是函数', disposers.length === 4)
+check('所有 disposer 都是函数', disposers.length === 5, `${disposers.length} 个（4 工具 + 1 路由）`)
 
 console.log(`\n${failures === 0 ? '全部通过 ✔' : `${failures} 项失败 ✘`}`)
 process.exitCode = failures === 0 ? 0 : 1

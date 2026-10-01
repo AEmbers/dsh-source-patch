@@ -18,13 +18,14 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { applyEdits, defaultArchivePath, detectState, readEntry, rewriteEntry } from './apply.mjs'
+import { isTrustedApiRequest } from './fence.js'
 import { GitHubPatchRegistry } from './remote.js'
 
 /** Plugin identity for cordis.yml rows. */
 export const name = 'dsh-source-patch'
 
-/** We register agent tools, so the tool registry must be mounted first. */
-export const inject = ['tools']
+/** Agent tools, plus the web server routes the client half talks to. */
+export const inject = ['tools', 'webServer', 'webRuntime']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BUILTIN_PATCH_DIR = join(HERE, 'patches')
@@ -86,7 +87,11 @@ export class SourcePatchRegistry {
         return
       }
       if (byId.has(patch.id)) {
-        conflicts.push({ origin, patchId: patch.id, reason: `already defined by ${byId.get(patch.id).origin}` })
+        const existing = byId.get(patch.id)
+        // The same definition reachable from two places (bundled + pulled from
+        // the registry) is not a conflict — the first source simply wins.
+        if (typeof text === 'string' && text === existing.sourceText) return
+        conflicts.push({ origin, patchId: patch.id, reason: `already defined by ${existing.origin}, 且内容不同` })
         return
       }
       byId.set(patch.id, { ...patch, origin, sourceFile: file, sourceText: text })
@@ -238,6 +243,54 @@ function describe(entry) {
   return `${entry.patchId} [${entry.state}] ${detail} — ${entry.title ?? ''}`
 }
 
+// ------------------------------------------------------------ client 半边的 HTTP API
+
+/** Read a small JSON request body; anything oversized or unparsable is a client error. */
+function readJsonBody(req, limit = 256 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('request body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (text.trim() === '') {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(text))
+      } catch (error) {
+        reject(new Error(`invalid JSON body: ${error.message}`))
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
+function writeJson(res, status, payload) {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(body),
+  })
+  res.end(body)
+}
+
+function requirePatchId(body) {
+  const id = body?.patchId
+  if (typeof id !== 'string' || id === '') throw new Error('patchId is required')
+  return id
+}
+
 export function apply(ctx) {
   const registry = new SourcePatchRegistry()
 
@@ -271,6 +324,83 @@ export function apply(ctx) {
       paths: () => ({ cache: remote.cacheDir, store: remote.storeDir, repo: remote.repoName }),
     },
   })
+
+  // ------------------------------------------------------------ 客户端半边走的 HTTP API
+  // 客户端半边活在渲染进程里，够不到宿主进程；这里给它一条本地路由。
+  // 信任围栏是防 DNS rebinding / 跨站用的 —— 这条路由能改主进程，所以不是可选项。
+  const apiMethods = {
+    status: async () => {
+      const { definitions, conflicts } = registry.definitions()
+      const patches = definitions.map((definition) => {
+        try {
+          const { patch, archivePath, entryPath } = registry.resolve(definition.id)
+          return {
+            id: definition.id,
+            title: patch.title,
+            summary: patch.summary,
+            origin: definition.origin,
+            version: definition.version ?? 1,
+            editCount: Array.isArray(patch.edits) ? patch.edits.length : 0,
+            requiresRestart: patch.requiresRestart !== false,
+            archivePath,
+            entryPath,
+            ...registry.inspect(patch, archivePath, entryPath),
+          }
+        } catch (error) {
+          return { id: definition.id, title: definition.title, origin: definition.origin, state: 'unavailable', error: error.message }
+        }
+      })
+      return {
+        archive: defaultArchivePath() ?? null,
+        patches,
+        conflicts,
+        paths: { backupRoot: BACKUP_ROOT, store: STORE_PATCH_DIR, cache: remote.cacheDir },
+      }
+    },
+    plan: async (body) => registry.plan(requirePatchId(body)),
+    apply: async (body) => registry.apply(requirePatchId(body), body?.confirm),
+    revert: async (body) => registry.revert(requirePatchId(body), body?.confirm),
+    remoteStatus: async () => {
+      const auth = await remote.auth()
+      const repo = auth.authenticated ? await remote.repoInfo() : { exists: false, full: await remote.fullName().catch(() => undefined) }
+      return { auth, repo, repoName: remote.repoName, paths: { cache: remote.cacheDir, store: remote.storeDir } }
+    },
+    remoteAvailable: async () => remote.available(),
+    remoteInstalled: async () => ({ patches: remote.installed() }),
+    remotePublish: async (body) => registry.publish(Array.isArray(body?.patchIds) && body.patchIds.length > 0 ? body.patchIds : undefined),
+    remoteInstall: async (body) => remote.install(requirePatchId(body)),
+    remoteUninstall: async (body) => remote.uninstall(requirePatchId(body)),
+  }
+
+  if (ctx.webServer !== undefined) {
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'prefix',
+      path: '/source-patch/api',
+      handler: async (req, res) => {
+        if (!isTrustedApiRequest(req, ctx.webRuntime?.trustedHosts ?? [])) {
+          writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+          return
+        }
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { ok: false, error: { code: 'method-error', message: 'method not allowed' } })
+          return
+        }
+        const pathname = new URL(req.url ?? '/', 'http://dsh.internal').pathname
+        const method = pathname.startsWith('/source-patch/api/') ? pathname.slice('/source-patch/api/'.length) : undefined
+        const handler = method === undefined || method.includes('/') ? undefined : apiMethods[method]
+        if (handler === undefined) {
+          writeJson(res, 404, { ok: false, error: { code: 'not-found', message: `unknown source-patch API method "${method ?? ''}"` } })
+          return
+        }
+        try {
+          const payload = await readJsonBody(req)
+          writeJson(res, 200, { ok: true, value: await handler(payload) })
+        } catch (error) {
+          writeJson(res, 400, { ok: false, error: { code: 'failed', message: error instanceof Error ? error.message : String(error) } })
+        }
+      },
+    }), 'dsh-source-patch: /source-patch/api routes')
+  }
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'source_patch_status',
