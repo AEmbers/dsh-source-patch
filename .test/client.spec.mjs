@@ -90,7 +90,17 @@ const tab = tabs[0]
 check('Tab id / kind 正确', tab?.id === 'dsh-source-patch' && tab?.kind === 'sourcePatch', `${tab?.id} / ${tab?.kind}`)
 check('Tab 是单实例且 keepMounted', tab?.multiple === false && tab?.keepMounted === true)
 check('Tab 标题是「补丁管理」', tab?.title?.('') === '补丁管理')
-check('Tab 有「开始」菜单入口', Array.isArray(tab?.guide) && tab.guide.length === 1 && tab.guide[0].title === '补丁管理')
+
+// 「开始」页面就是这么用 guide 条目的：GuideBody 对每个条目调 entry.title()。
+// 之前这里把 title 写成字符串，GuideBody 抛 `entry.title is not a function`，
+// 整个「开始」页面直接空白 —— 所以这条断言必须照着官方接口来。
+check('Tab 有「开始」菜单入口', Array.isArray(tab?.guide) && tab.guide.length === 1)
+const entry = tab.guide[0]
+check('guide entry 形状正确', entry?.id === 'open-source-patch' && typeof entry?.order === 'number')
+check('guide entry.title 是 thunk（GuideBody 会调用它）', typeof entry?.title === 'function', typeof entry?.title)
+check('guide entry.description 是 thunk', entry?.description === undefined || typeof entry?.description === 'function', typeof entry?.description)
+check('调 entry.title() 不炸', entry?.title?.() === '补丁管理', String(entry?.title?.()))
+check('调 entry.description() 不炸', entry?.description?.() !== undefined)
 check('注册了 1 个 body 槽位', slots.length === 1)
 check('槽位 key 与 Tab id 一致', slots[0]?.spec?.key === 'dsh-source-patch' && slots[0]?.spec?.name === 'sidebar.right.pane.tab')
 check('body 是组件', typeof slots[0]?.component === 'function')
