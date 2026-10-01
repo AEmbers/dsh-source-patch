@@ -11,8 +11,32 @@
  * 4. 备份只存原始 lib/main.js（约 480KB）就够回滚；可选的整包备份另说。
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, openSync, closeSync, rmSync } from 'node:fs'
+import * as nodeFs from 'node:fs'
+import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+
+/**
+ * The fs view used for the archive itself.
+ *
+ * Under Electron the main `fs` is patched so `resources/app.asar` looks like a
+ * **directory**: `existsSync` answers yes while `readFileSync` throws
+ * `ENOENT: not found in <archive>`. Inside the DSH desktop host that is exactly
+ * what happens, and it is invisible from a plain `node` CLI. `original-fs` is
+ * Electron's unpatched view and opens the archive as the ordinary file it is;
+ * outside Electron the require fails and plain `node:fs` is already correct.
+ */
+export const archiveFs = (() => {
+  try {
+    const original = createRequire(import.meta.url)('original-fs')
+    return typeof original?.readFileSync === 'function' ? original : nodeFs
+  } catch {
+    return nodeFs
+  }
+})()
+
+/** Which fs module the archive operations actually use ("original-fs" or "node:fs"). */
+export const archiveFsName = archiveFs === nodeFs ? 'node:fs' : 'original-fs'
 
 // ---------------------------------------------------------------- asar 结构
 
@@ -62,7 +86,7 @@ export function entryInfo(header, entryPath) {
 
 /** 用一个新的文件内容替换 asar 里的某个条目，保持其余字节完全不变。 */
 export function rewriteEntry(archivePath, entryPath, newContent) {
-  const buffer = readFileSync(archivePath)
+  const buffer = archiveFs.readFileSync(archivePath)
   const parsed = parseArchive(buffer)
 
   // 自我校验：只有当我们能逐字节还原头部时才敢写。
@@ -125,11 +149,11 @@ export function rewriteEntry(archivePath, entryPath, newContent) {
   ])
 
   const staging = `${archivePath}.dsh-patch.new`
-  writeFileSync(staging, out)
+  archiveFs.writeFileSync(staging, out)
   try {
-    renameSync(staging, archivePath)
+    archiveFs.renameSync(staging, archivePath)
   } catch (error) {
-    rmSync(staging, { force: true })
+    archiveFs.rmSync(staging, { force: true })
     throw new Error(
       `cannot replace ${archivePath} (${error.code ?? error.message}) — `
       + '在 Windows 上这几乎总是因为 DSH 正在运行、把这个文件占着。关掉 DSH 再试（已经清掉半成品，没有留下垃圾文件）。',
@@ -140,7 +164,7 @@ export function rewriteEntry(archivePath, entryPath, newContent) {
 }
 
 export function readEntry(archivePath, entryPath) {
-  const buffer = readFileSync(archivePath)
+  const buffer = archiveFs.readFileSync(archivePath)
   const parsed = parseArchive(buffer)
   const info = entryInfo(parsed.header, entryPath)
   if (info === undefined || info.size === undefined) throw new Error(`asar entry not found: ${entryPath}`)
@@ -242,7 +266,7 @@ export function defaultArchivePath() {
 
 function assertWritable(archivePath) {
   try {
-    closeSync(openSync(archivePath, 'r+'))
+    closeSync(archiveFs.openSync(archivePath, 'r+'))
   } catch (error) {
     throw new Error(`cannot open ${archivePath} for writing (${error.code ?? error.message}) — 先关掉正在运行的 DSH`)
   }

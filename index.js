@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { applyEdits, defaultArchivePath, detectState, readEntry, rewriteEntry } from './apply.mjs'
+import { applyEdits, archiveFsName, defaultArchivePath, detectState, readEntry, rewriteEntry } from './apply.mjs'
 import { isTrustedApiRequest } from './fence.js'
 import { GitHubPatchRegistry } from './remote.js'
 
@@ -354,7 +354,7 @@ export function apply(ctx) {
         archive: defaultArchivePath() ?? null,
         patches,
         conflicts,
-        paths: { backupRoot: BACKUP_ROOT, store: STORE_PATCH_DIR, cache: remote.cacheDir },
+        paths: { backupRoot: BACKUP_ROOT, store: STORE_PATCH_DIR, cache: remote.cacheDir, archiveFs: archiveFsName },
       }
     },
     plan: async (body) => registry.plan(requirePatchId(body)),
