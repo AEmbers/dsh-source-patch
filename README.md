@@ -79,6 +79,70 @@ node .test/plugin.spec.mjs
 > 在工作区里则靠 `../node_modules/@deepseek-ai/dsh-tools` 那个**仅测试用**的 shim。
 > 这个 shim 刻意放在**包外** —— 放在包内会遮蔽 profile 里真正的 `dsh-tools`。
 
+## 用法三：跨设备 —— GitHub 私有补丁仓库
+
+插件可以把补丁包放到你 GitHub 上的一个 **私有仓库** 里。换台机器装同一个插件，就能把补丁拉回来。
+
+### 认证：靠官方 `gh`，本插件永远不碰你的 token
+
+它只调用官方 GitHub CLI（`gh`），token 存在操作系统的凭据库里（Windows 是凭据管理器）。
+
+- **没装 gh** → 提示你去 <https://cli.github.com/> 装一个
+- **装了但没登录** → 提示你运行一次：
+
+  ```powershell
+  gh auth login --hostname github.com --git-protocol https --web
+  ```
+
+  这条命令走**设备码流程**：终端给你一个一次性代码，同时在浏览器里打开 GitHub，
+  你确认一次就完事。之后本插件直接复用这份登录态 —— 不需要你到任何地方粘贴 PAT。
+
+### 仓库
+
+默认在 `<你的账号>/dsh-patches`，**私有**，首次 `publish` 时自动创建。里面就是可读可 diff 的纯 JSON：
+
+```
+registry.json          # 索引：id / version / title / sha256 / 编辑数 / 体积
+patches/<id>.json      # 完整的补丁定义
+```
+
+### 操作
+
+对 agent 说一句就行（工具 `source_patch_remote`）：
+
+| action | 干什么 | 要 confirm 吗 |
+|---|---|---|
+| `status` | gh 装没装、登录没登录、私有仓库在不在 | 不用 |
+| `available` | 远端有哪些补丁、本地装没装、有没有新版本 | 不用 |
+| `installed` | 本地 store 里有哪些 | 不用 |
+| `publish` | 把本地补丁推上去（缺省全推，可传 id 过滤） | 需要 `confirm="publish"` |
+| `install` | 下载某个补丁到本地 store（带 sha256 校验） | 需要 `confirm` 等于补丁 id |
+| `uninstall` | 从本地 store 删掉 | 需要 `confirm` 等于补丁 id |
+
+也可以在别的插件里直接用服务：
+
+```js
+const remote = ctx.get('sourcePatch').remote
+await remote.ensureRepo()
+await remote.publish(['sidebar-browser-durable-identity'])
+await remote.install('sidebar-browser-durable-identity')
+```
+
+### 本地位置
+
+```
+~/.dsh/dsh-source-patch/repo/       # 私有仓库的缓存 clone
+~/.dsh/dsh-source-patch/patches/    # 从远端装下来的补丁定义
+```
+
+`patches/` 里的定义会被 `ctx.sourcePatch.definitions()` 当作 `store` 来源一起列出来 ——
+**装下来就能直接用**，和内置补丁一视同仁。
+
+### 边界（不长但重要）
+
+`publish` 和 `install` **只搬 JSON**。它们不会应用补丁；应用仍然要单独过一次
+`source_patch_apply`（还得 confirm 等于补丁 id），而且任何一步都**不会替你重启 DSH**。
+
 ## 它改了什么
 
 目标：安装版 `resources/app.asar` 里的 `lib/main.js`（打包后的主进程，约 480KB）。

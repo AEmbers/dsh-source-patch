@@ -46,8 +46,8 @@ const ctx = {
 console.log('\n--- 挂载插件 ---')
 applyPlugin(ctx)
 check('发布了 ctx.sourcePatch 服务', provided.has('sourcePatch'))
-check('注册了 3 个工具', tools.length === 3, tools.map((t) => t.name).join(', '))
-check('工具名符合预期', ['source_patch_status', 'source_patch_apply', 'source_patch_revert'].every((n) => tools.some((t) => t.name === n)))
+check('注册了 4 个工具', tools.length === 4, tools.map((t) => t.name).join(', '))
+check('工具名符合预期', ['source_patch_status', 'source_patch_apply', 'source_patch_revert', 'source_patch_remote'].every((n) => tools.some((t) => t.name === n)))
 
 const service = provided.get('sourcePatch')
 
@@ -128,9 +128,28 @@ try {
   check('失败后没有留下半成品文件', !existsSync(`${REAL}.dsh-patch.new`))
 }
 
+console.log('\n--- GitHub 远端（只读部分）---')
+const remoteTool = tools.find((t) => t.name === 'source_patch_remote')
+const remoteStatus = await remoteTool.execute({ action: 'status' }, exec)
+check('gh 已安装', remoteStatus.detail.auth.ghInstalled === true, `version=${remoteStatus.detail.auth.version ?? '?'}`)
+check('gh 已登录', remoteStatus.detail.auth.authenticated === true, `account=${remoteStatus.detail.auth.account ?? '?'}`)
+console.log('      ' + remoteTool.output.render(remoteStatus).replace(/\n/g, '\n      '))
+try {
+  await remoteTool.execute({ action: 'publish' }, exec)
+  check('publish 缺 confirm 会被拒', false, '(居然成功了)')
+} catch (error) {
+  check('publish 缺 confirm 会被拒', /confirm/.test(error.message), error.message.slice(0, 70))
+}
+try {
+  await remoteTool.execute({ action: 'unknown-action' }, exec)
+  check('未知 action 被拒', false)
+} catch (error) {
+  check('未知 action 被拒', /未知的 action/.test(error.message))
+}
+
 console.log('\n--- 清理 ---')
 for (const dispose of disposers) dispose()
-check('所有 disposer 都是函数', disposers.length === 3)
+check('所有 disposer 都是函数', disposers.length === 4)
 
 console.log(`\n${failures === 0 ? '全部通过 ✔' : `${failures} 项失败 ✘`}`)
 process.exitCode = failures === 0 ? 0 : 1

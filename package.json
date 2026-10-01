@@ -20,6 +20,7 @@
   },
   "files": [
     "index.js",
+    "remote.js",
     "apply.mjs",
     "patches",
     "cordis.patch.yml",

@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { applyEdits, defaultArchivePath, detectState, readEntry, rewriteEntry } from './apply.mjs'
+import { GitHubPatchRegistry } from './remote.js'
 
 /** Plugin identity for cordis.yml rows. */
 export const name = 'dsh-source-patch'
@@ -29,12 +30,24 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const BUILTIN_PATCH_DIR = join(HERE, 'patches')
 const BACKUP_ROOT = join(process.env.USERPROFILE ?? process.cwd(), '.dsh', 'source-patch-backups')
 
+/** The GitHub-backed registry; also owns the local store path. */
+const remote = new GitHubPatchRegistry()
+const STORE_PATCH_DIR = remote.storeDir
+
 /** Read every bundled patch definition. */
 function readBuiltinPatches() {
   if (!existsSync(BUILTIN_PATCH_DIR)) return []
   return readdirSync(BUILTIN_PATCH_DIR)
     .filter((file) => file.endsWith('.json'))
     .map((file) => ({ file: join(BUILTIN_PATCH_DIR, file), origin: 'builtin', bytes: readFileSync(join(BUILTIN_PATCH_DIR, file), 'utf8') }))
+}
+
+/** Read patch definitions pulled down from the private registry repo. */
+function readStorePatches() {
+  if (!existsSync(STORE_PATCH_DIR)) return []
+  return readdirSync(STORE_PATCH_DIR)
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => ({ file: join(STORE_PATCH_DIR, file), origin: 'store', bytes: readFileSync(join(STORE_PATCH_DIR, file), 'utf8') }))
 }
 
 /**
@@ -67,7 +80,7 @@ export class SourcePatchRegistry {
   definitions() {
     const byId = new Map()
     const conflicts = []
-    const consider = (patch, origin) => {
+    const consider = (patch, origin, file, text) => {
       if (patch === null || typeof patch !== 'object' || typeof patch.id !== 'string') {
         conflicts.push({ origin, reason: 'definition has no string id' })
         return
@@ -76,11 +89,11 @@ export class SourcePatchRegistry {
         conflicts.push({ origin, patchId: patch.id, reason: `already defined by ${byId.get(patch.id).origin}` })
         return
       }
-      byId.set(patch.id, { ...patch, origin })
+      byId.set(patch.id, { ...patch, origin, sourceFile: file, sourceText: text })
     }
-    for (const source of readBuiltinPatches()) {
+    for (const source of [...readBuiltinPatches(), ...readStorePatches()]) {
       try {
-        consider(JSON.parse(source.bytes), source.origin)
+        consider(JSON.parse(source.bytes), source.origin, source.file, source.bytes)
       } catch (error) {
         conflicts.push({ origin: source.file, reason: `not valid JSON: ${error.message}` })
       }
@@ -91,12 +104,12 @@ export class SourcePatchRegistry {
           const path = patch instanceof URL ? fileURLToPath(patch) : patch
           const absolute = isAbsolute(path) ? path : resolve(path)
           try {
-            consider(JSON.parse(readFileSync(absolute, 'utf8')), `plugin:${owner}`)
+            consider(JSON.parse(readFileSync(absolute, 'utf8')), `plugin:${owner}`, absolute, readFileSync(absolute, 'utf8'))
           } catch (error) {
             conflicts.push({ origin: `plugin:${owner}`, file: absolute, reason: `cannot read: ${error.message}` })
           }
         } else {
-          consider(patch, `plugin:${owner}`)
+          consider(patch, `plugin:${owner}`, undefined, JSON.stringify(patch, null, 2) + '\n')
         }
       }
     }
@@ -202,6 +215,21 @@ export class SourcePatchRegistry {
       message: result.changed ? '已回滚。重启 DSH 生效。' : '本来就等于备份内容，不需要回滚。',
     }
   }
+
+  /**
+   * Publish patch definitions to the private registry repo.
+   * @param patchIds - ids to publish; omitted publishes everything currently known.
+   */
+  async publish(patchIds) {
+    const { definitions } = this.definitions()
+    const wanted = patchIds === undefined || patchIds.length === 0
+      ? definitions
+      : definitions.filter((definition) => patchIds.includes(definition.id))
+    if (wanted.length === 0) throw new Error('没有匹配的补丁可发布')
+    const missing = wanted.filter((definition) => typeof definition.sourceText !== 'string')
+    if (missing.length > 0) throw new Error(`这些补丁没有可发布的文本形式：${missing.map((d) => d.id).join(', ')}`)
+    return remote.publish(wanted.map((definition) => ({ id: definition.id, definition, text: definition.sourceText })))
+  }
 }
 
 /** One-line projection of a plan/inspect result for the model. */
@@ -224,6 +252,24 @@ export function apply(ctx) {
     },
     apply: (patchId, confirmation, archivePath) => registry.apply(patchId, confirmation, archivePath),
     revert: (patchId, confirmation, archivePath) => registry.revert(patchId, confirmation, archivePath),
+
+    /**
+     * The GitHub-backed side: authenticate through the `gh` CLI (this plugin
+     * never sees a token), keep a private repo of patch packages, and move
+     * JSON in and out of it so the same patches follow you across machines.
+     */
+    remote: {
+      auth: () => remote.auth(),
+      repo: () => remote.repoInfo(),
+      ensureRepo: () => remote.ensureRepo(),
+      sync: () => remote.sync(),
+      available: () => remote.available(),
+      installed: () => remote.installed(),
+      install: (patchId) => remote.install(patchId),
+      uninstall: (patchId) => remote.uninstall(patchId),
+      publish: (patchIds) => registry.publish(patchIds),
+      paths: () => ({ cache: remote.cacheDir, store: remote.storeDir, repo: remote.repoName }),
+    },
   })
 
   ctx.effect(() => ctx.tools.register(defineTool({
@@ -339,6 +385,92 @@ export function apply(ctx) {
     execute: async (args, exec) => {
       exec.signal.throwIfAborted()
       return registry.revert(args.patchId, args.confirm)
+    },
+  })))
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'source_patch_remote',
+    description:
+      'Manage DSH source-patch packages through a private GitHub repo, so the same patches follow you across machines. '
+      + 'Authentication is delegated to the official `gh` CLI — this plugin never handles a token, and the one-time login is `gh auth login --hostname github.com --git-protocol https --web`. '
+      + 'Actions: '
+      + 'status (is gh installed / logged in / does the private patches repo exist), '
+      + 'available (remote registry entries vs what is installed locally), '
+      + 'installed (local store contents), '
+      + 'publish (push local patch definitions to the private repo), '
+      + 'install (download one patch definition into the local store), '
+      + 'uninstall (drop one from the local store). '
+      + 'publish requires confirm="publish"; install and uninstall require confirm to repeat the exact patchId. '
+      + 'Installing only downloads a JSON definition — applying it is a separate, separately-confirmed step, and neither restarts DSH.',
+    parameters: {
+      action: { type: 'string', required: true, description: 'status | available | installed | publish | install | uninstall' },
+      patchId: { type: 'string', description: 'Required for install and uninstall. For publish, an optional comma-separated filter; omit to publish everything known.' },
+      confirm: { type: 'string', description: 'publish requires "publish"; install and uninstall require the exact patchId.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true, description: 'The action that ran.' },
+          ok: { type: 'boolean', required: true, description: 'Whether it succeeded.' },
+          detail: { type: 'object', additionalProperties: true, description: 'Action-specific payload.' },
+        },
+      },
+      render: (value) => {
+        const d = value.detail ?? {}
+        switch (value.action) {
+          case 'status':
+            return `gh: ${d.auth?.ghInstalled ? '已安装' : '未安装'} · 登录: ${d.auth?.authenticated ? `是（${d.auth.account ?? '?'}）` : '否'} · 补丁仓库 ${d.repo?.full ?? '?'}: ${d.repo?.exists ? `存在（${d.repo.visibility ?? ''}）` : '还不存在'}`
+              + (d.auth?.authenticated ? '' : `\n需要先登录：${d.auth?.hint ?? 'gh auth login'}`)
+          case 'available':
+            return (d.patches ?? []).length === 0
+              ? '远端 registry 里还没有补丁'
+              : (d.patches).map((p) => `  ${p.installed ? (p.upToDate ? '✔' : '↑') : '·'} ${p.id} v${p.version}  ${p.title}${p.installed ? (p.upToDate ? ' (已安装)' : ' (有更新)') : ''}`).join('\n')
+          case 'installed':
+            return (d.patches ?? []).length === 0 ? '本地 store 里没有从远端装的补丁' : d.patches.map((p) => `  ${p.id} v${p.version}  ${p.title}`).join('\n')
+          case 'publish':
+            return `已发布 ${d.published.join(', ')} → ${d.repo}${d.committed ? '' : '（内容没变化，未产生新提交）'}`
+          case 'install':
+            return `已安装 ${d.patchId} v${d.version} → ${d.file}`
+          case 'uninstall':
+            return d.removed ? `已卸载 ${d.patchId}` : `${d.patchId} 本来就没装`
+          default:
+            return JSON.stringify(d)
+        }
+      },
+    },
+    execute: async (args, exec) => {
+      exec.signal.throwIfAborted()
+      const action = args.action
+      switch (action) {
+        case 'status': {
+          const auth = await remote.auth()
+          const repo = auth.authenticated ? await remote.repoInfo() : { exists: false, full: await remote.fullName().catch(() => undefined) }
+          return { action, ok: true, detail: { auth, repo, paths: { cache: remote.cacheDir, store: remote.storeDir } } }
+        }
+        case 'available':
+          return { action, ok: true, detail: await remote.available() }
+        case 'installed':
+          return { action, ok: true, detail: { patches: remote.installed() } }
+        case 'publish': {
+          if (args.confirm !== 'publish') throw new Error('发布需要 confirm="publish"')
+          const filter = typeof args.patchId === 'string' && args.patchId.trim() !== '' ? args.patchId.split(',').map((s) => s.trim()).filter(Boolean) : undefined
+          return { action, ok: true, detail: await registry.publish(filter) }
+        }
+        case 'install': {
+          if (typeof args.patchId !== 'string' || args.patchId === '') throw new Error('install 需要 patchId')
+          if (args.confirm !== args.patchId) throw new Error(`安装需要 confirm 等于补丁 id（"${args.patchId}"）`)
+          return { action, ok: true, detail: await remote.install(args.patchId) }
+        }
+        case 'uninstall': {
+          if (typeof args.patchId !== 'string' || args.patchId === '') throw new Error('uninstall 需要 patchId')
+          if (args.confirm !== args.patchId) throw new Error(`卸载需要 confirm 等于补丁 id（"${args.patchId}"）`)
+          return { action, ok: true, detail: remote.uninstall(args.patchId) }
+        }
+        default:
+          throw new Error(`未知的 action "${action}"，可选：status / available / installed / publish / install / uninstall`)
+      }
     },
   })))
 }
