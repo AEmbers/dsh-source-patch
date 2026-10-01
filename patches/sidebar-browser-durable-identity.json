@@ -1,6 +1,6 @@
 {
   "id": "sidebar-browser-durable-identity",
-  "version": 1,
+  "version": "1.1.0",
   "title": "侧边栏浏览器：持久身份 / 功能完整 / agent 可操控",
   "summary": "把 DSH 桌面版主进程里侧边栏浏览器 guest 的「固定隔离策略」改成「持久、按身份隔离」的策略，让侧边栏里的浏览器能长期记住登录、放行 Chromium 内嵌插件与原生弹窗、按白名单授予站点权限、允许下载，并可选地开一个只绑回环地址的 CDP 端点供 agent 操控。",
   "target": {
@@ -60,10 +60,10 @@
     },
     {
       "id": "guest-cdp-endpoint",
-      "title": "新增 DSH_DESKTOP_CDP_PORT：可选的回环 CDP 端点，供 agent 操控侧边栏 guest",
+      "title": "新增 CDP 端点开关：环境变量 DSH_DESKTOP_CDP_PORT，或 ~/.dsh/desktop-cdp-port 文件（后者不受 Windows 环境块传播影响）",
       "find": "^([ \\t]*)if \\(claimDesktopSingleInstance\\(app, \\(\\) => \\{$",
       "flags": "m",
-      "replace": "function installGuestDebuggingEndpoint() {\n\tconst raw = process.env.DSH_DESKTOP_CDP_PORT;\n\tif (raw === void 0 || raw === \"\") return;\n\tconst port = Number(raw);\n\tif (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(\"dsh desktop: DSH_DESKTOP_CDP_PORT must be an integer from 1 through 65535\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-address\", \"127.0.0.1\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-port\", String(port));\n}\ninstallGuestDebuggingEndpoint();\n$1if (claimDesktopSingleInstance(app, () => {",
+      "replace": "function guestDebuggingPortFile() {\n\ttry {\n\t\tconst file = join(homedir(), \".dsh\", \"desktop-cdp-port\");\n\t\treturn existsSync(file) ? readFileSync(file, \"utf8\").trim() : \"\";\n\t} catch {\n\t\treturn \"\";\n\t}\n}\nfunction installGuestDebuggingEndpoint() {\n\tconst fromEnv = process.env.DSH_DESKTOP_CDP_PORT;\n\tconst raw = fromEnv !== void 0 && fromEnv !== \"\" ? fromEnv : guestDebuggingPortFile();\n\tif (raw === void 0 || raw === \"\") return;\n\tconst port = Number(raw);\n\tif (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(\"dsh desktop: DSH_DESKTOP_CDP_PORT must be an integer from 1 through 65535\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-address\", \"127.0.0.1\");\n\tapp.commandLine.appendSwitch(\"remote-debugging-port\", String(port));\n}\ninstallGuestDebuggingEndpoint();\n$1if (claimDesktopSingleInstance(app, () => {",
       "marker": "function installGuestDebuggingEndpoint() {"
     }
   ]
