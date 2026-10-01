@@ -562,8 +562,17 @@ export function apply(ctx) {
               : (d.patches).map((p) => `  ${p.installed ? (p.upToDate ? '✔' : '↑') : '·'} ${p.id} v${p.version}  ${p.title}${p.installed ? (p.upToDate ? ' (已安装)' : ' (有更新)') : ''}`).join('\n')
           case 'installed':
             return (d.patches ?? []).length === 0 ? '本地 store 里没有从远端装的补丁' : d.patches.map((p) => `  ${p.id} v${p.version}  ${p.title}`).join('\n')
-          case 'publish':
-            return `已发布 ${d.published.join(', ')} → ${d.repo}${d.committed ? '' : '（内容没变化，未产生新提交）'}`
+          case 'publish': {
+            // The node half reports a single patch for a filtered publish and a
+            // list for a bulk one; render both without assuming either shape.
+            const items = Array.isArray(d.published) ? d.published : [d]
+            const list = items
+              .map((p) => (typeof p === 'string' ? p : [p.id ?? p.patchId, p.version].filter(Boolean).join(' ')))
+              .filter((s) => s.length > 0)
+              .join(', ')
+            const repo = d.repo?.full ?? d.repo ?? '?'
+            return `已发布 ${list.length > 0 ? list : '（没有可发布的补丁）'} → ${repo}${d.committed === false ? '（内容没变化，未产生新提交）' : ''}`
+          }
           case 'install':
             return `已安装 ${d.patchId} v${d.version} → ${d.file}`
           case 'uninstall':
