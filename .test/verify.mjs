@@ -2,11 +2,11 @@
  * 端到端验证：把补丁打到一个 app.asar 的副本上，再逐项检查。
  * 全程不碰真实的安装版。
  */
-import { copyFileSync, mkdirSync, writeFileSync, statSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, statSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseArchive, entryInfo } from '../apply.mjs'
+import { parseArchive, entryInfo, rewriteEntry } from '../apply.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = 'C:/Users/Administrator/AppData/Local/Programs/DeepSeek Harness/resources/app.asar'
@@ -31,9 +31,23 @@ const samples = [
 ]
 
 mkdirSync(HERE, { recursive: true })
-const before = statSync(COPY, { throwIfNoEntry: false })
-console.log(before ? '复用已有的 asar 副本' : '复制 app.asar 到工作目录…')
-if (!before) copyFileSync(SOURCE, COPY)
+
+// Always rebuild the fixture from the installed archive. Reusing a copy a
+// previous run had already patched made every anchor report "matched 0 times",
+// which says nothing about the patch itself.
+console.log('复制 app.asar 到工作目录…')
+copyFileSync(SOURCE, COPY)
+
+// The installed archive may already carry the patch (a normal steady state on a
+// machine that uses it). Put the pristine lib/main.js back — the backup apply()
+// wrote — so this test always exercises a clean apply.
+const PRISTINE = join(process.env.USERPROFILE ?? '', '.dsh', 'source-patch-backups', 'sidebar-browser-durable-identity', 'main.js.orig')
+if (existsSync(PRISTINE)) {
+  rewriteEntry(COPY, 'lib/main.js', readFileSync(PRISTINE))
+  console.log('已把原始 lib/main.js 放回副本（取自备份）')
+} else {
+  console.log('⚠ 没找到原始 lib/main.js 备份 —— 如果这台机器的安装版已经打过补丁，下面的锚点会全部落空')
+}
 console.log(`副本大小 ${statSync(COPY).size}`)
 
 console.log('\n--- 记录原副本里若干条目的字节 ---')
