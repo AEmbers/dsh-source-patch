@@ -9,7 +9,7 @@
  * safe on a live file.
  */
 
-import { copyFileSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -17,7 +17,7 @@ import { createRequire } from 'node:module'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
-const { applyEdits, defaultArchivePath, parseArchive, readEntry, rewriteEntryInPlace } = await import(
+const { applyEdits, defaultArchivePath, parseArchive, readEntry, rewriteEntry, rewriteEntryInPlace } = await import(
   pathToFileURL(join(root, 'apply.mjs')).href
 )
 
@@ -58,6 +58,13 @@ const scratch = join(tmpdir(), `dsh-inplace-${process.pid}.asar`)
 console.log(`源归档 ${source}`)
 console.log(`副本   ${scratch}\n`)
 copyFileSync(source, scratch)
+
+// The installed archive may already carry the patch — a normal steady state on a
+// machine that uses it. Put the pristine lib/main.js back (the backup apply()
+// wrote) BEFORE any baseline is recorded, so the numbers below describe a clean
+// archive and do not include the restore itself.
+const pristineEntry = join(process.env.USERPROFILE ?? '', '.dsh', 'source-patch-backups', 'sidebar-browser-durable-identity', 'main.js.orig')
+if (existsSync(pristineEntry)) rewriteEntry(scratch, 'lib/main.js', readFileSync(pristineEntry))
 
 try {
   const patch = JSON.parse(readFileSync(join(root, 'patches', 'sidebar-browser-durable-identity.json'), 'utf8'))
