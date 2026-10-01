@@ -152,15 +152,73 @@ export function rewriteEntry(archivePath, entryPath, newContent) {
   archiveFs.writeFileSync(staging, out)
   try {
     archiveFs.renameSync(staging, archivePath)
+    return { changed: true, oldContent, delta, mode: 'replace' }
   } catch (error) {
     archiveFs.rmSync(staging, { force: true })
-    throw new Error(
-      `cannot replace ${archivePath} (${error.code ?? error.message}) — `
-      + '在 Windows 上这几乎总是因为 DSH 正在运行、把这个文件占着。关掉 DSH 再试（已经清掉半成品，没有留下垃圾文件）。',
-      { cause: error },
-    )
+    if (error.code !== 'EPERM' && error.code !== 'EACCES' && error.code !== 'EBUSY') {
+      throw new Error(`cannot replace ${archivePath} (${error.code ?? error.message})`, { cause: error })
+    }
+    // The running host holds the archive open, so Windows refuses to REPLACE the
+    // file. Growing it in place never replaces it — see rewriteEntryInPlace.
+    return { changed: true, oldContent, delta, mode: rewriteEntryInPlace(archivePath, entryPath, newContent) }
   }
-  return { changed: true, oldContent, delta }
+}
+
+/**
+ * Patch one entry **without replacing the archive file**, so it works while DSH
+ * is running.
+ *
+ * Replacing `app.asar` needs DELETE access, which the Electron host denies while
+ * it holds the archive open. Appending does not. So the entry's new bytes are
+ * written to the very END of the archive and the header is pointed at them,
+ * which means **no other file's bytes move** and every other offset stays valid.
+ *
+ * Two consequences make this safe to do on a live file:
+ *   - the header pickle is padded back to its exact original length, so the data
+ *     region never shifts either (JSON ignores the trailing spaces);
+ *   - the append happens first and the header last, so a concurrent reader sees
+ *     either the old archive or the new one, never a torn one.
+ *
+ * The price is the superseded bytes: they stay in the archive as dead weight
+ * (a few hundred KB for one entry) until the app is reinstalled.
+ *
+ * @returns the mode string ("in-place") for the caller to report.
+ */
+export function rewriteEntryInPlace(archivePath, entryPath, newContent) {
+  const buffer = archiveFs.readFileSync(archivePath)
+  const parsed = parseArchive(buffer)
+  const rebuilt = buildHeaderPickle(parsed.headerString)
+  if (!rebuilt.equals(parsed.headerBytes)) {
+    throw new Error('asar header round-trip mismatch — refusing to write in place')
+  }
+
+  const info = entryInfo(parsed.header, entryPath)
+  if (info === undefined || info.size === undefined) throw new Error(`asar entry not found: ${entryPath}`)
+  if (info.unpacked === true) throw new Error(`asar entry is unpacked (lives in app.asar.unpacked): ${entryPath}`)
+
+  const dataStart = 8 + parsed.headerSize
+  info.offset = String(buffer.length - dataStart)
+  info.size = newContent.length
+
+  const jsonBudget = parsed.headerSize - 8
+  let headerJson = JSON.stringify(parsed.header)
+  if (headerJson.length > jsonBudget) {
+    throw new Error(`header would grow by ${headerJson.length - jsonBudget} bytes; cannot patch in place`)
+  }
+  headerJson = headerJson.padEnd(jsonBudget, ' ')
+  const headerPickle = buildHeaderPickle(headerJson)
+  if (headerPickle.length !== parsed.headerSize) {
+    throw new Error(`padding did not restore the header size (${headerPickle.length} vs ${parsed.headerSize})`)
+  }
+
+  const fd = archiveFs.openSync(archivePath, 'r+')
+  try {
+    archiveFs.writeSync(fd, newContent, 0, newContent.length, buffer.length)
+    archiveFs.writeSync(fd, headerPickle, 0, headerPickle.length, 8)
+  } finally {
+    archiveFs.closeSync(fd)
+  }
+  return 'in-place'
 }
 
 export function readEntry(archivePath, entryPath) {
@@ -264,11 +322,18 @@ export function defaultArchivePath() {
   return undefined
 }
 
+/**
+ * Confirm the archive is there before doing any work.
+ *
+ * Deliberately does NOT probe for exclusive write access: while DSH runs the
+ * host holds the archive, and the in-place path is exactly the mode that still
+ * works then. Whether a write is possible is decided by the write itself.
+ */
 function assertWritable(archivePath) {
   try {
-    closeSync(archiveFs.openSync(archivePath, 'r+'))
+    archiveFs.accessSync(archivePath)
   } catch (error) {
-    throw new Error(`cannot open ${archivePath} for writing (${error.code ?? error.message}) — 先关掉正在运行的 DSH`)
+    throw new Error(`archive not readable: ${archivePath} (${error.code ?? error.message})`)
   }
 }
 

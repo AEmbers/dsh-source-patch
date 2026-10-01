@@ -198,9 +198,12 @@ export class SourcePatchRegistry {
       patchId,
       changed: result.changed,
       state: 'applied',
+      mode: result.mode,
       deltaBytes: result.delta,
       backup: backupDir,
-      message: '已应用。必须重启 DSH 才生效 —— 本插件不会替你重启。',
+      message: result.mode === 'in-place'
+        ? '已应用（原地写入，没有替换文件 —— 所以 DSH 开着也能打）。重启 DSH 生效，本插件不会替你重启。'
+        : '已应用。必须重启 DSH 才生效 —— 本插件不会替你重启。',
     }
   }
 
